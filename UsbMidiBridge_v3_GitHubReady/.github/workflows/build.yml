@@ -1,0 +1,32 @@
+
+name: Build AIX
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "UsbMidiBridge_v3_GitHubReady/**"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build extension
+        uses: pavi2410/AIX-Action@main
+        with:
+          source-dir: UsbMidiBridge_v3_GitHubReady/src
+          package-name: com.valentino.midibridge
+
+      - name: Find AIX files
+        run: find . -type f -name "*.aix" -print
+
+      - name: Upload AIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UsbMidiBridge-AIX
+          path: "**/*.aix"
+          if-no-files-found: error
