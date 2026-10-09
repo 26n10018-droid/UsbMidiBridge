@@ -1,4 +1,3 @@
-```java
 package com.valentino.midibridge;
 
 import android.content.Context;
@@ -361,4 +360,3 @@ public class UsbMidiBridge
         Disconnected();
     }
 }
-```
