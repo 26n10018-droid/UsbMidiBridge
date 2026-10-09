@@ -1,3 +1,4 @@
+```java
 package com.valentino.midibridge;
 
 import android.content.Context;
@@ -21,28 +22,39 @@ import com.google.appinventor.components.runtime.ComponentContainer;
 import com.google.appinventor.components.runtime.EventDispatcher;
 
 @DesignerComponent(
-    version = 3,
-    versionName = "0.3.0",
-    description = "USB/Android MIDI bridge for MIT App Inventor. Reads MIDI keyboards connected through USB OTG.",
+    version = 4,
+    versionName = "0.4.0",
+    description = "USB OTG MIDI keyboard bridge with parsed MIDI messages.",
     category = ComponentCategory.EXTENSION,
     nonVisible = true,
     iconName = "images/icon.png"
 )
 @SimpleObject(external = true)
-public class UsbMidiBridge extends AndroidNonvisibleComponent implements Component {
+public class UsbMidiBridge
+        extends AndroidNonvisibleComponent
+        implements Component {
 
     private final Context context;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Handler mainHandler =
+            new Handler(Looper.getMainLooper());
+
     private MidiManager midiManager;
     private MidiDevice device;
     private MidiOutputPort outputPort;
+
+    // MIDI stream parser
+    private int runningStatus = -1;
+    private int expectedDataBytes = 0;
+    private int dataCount = 0;
+    private final int[] messageData = new int[2];
 
     public UsbMidiBridge(ComponentContainer container) {
         super(container.$form());
         context = container.$context();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            midiManager = (MidiManager) context.getSystemService(Context.MIDI_SERVICE);
+            midiManager = (MidiManager)
+                    context.getSystemService(Context.MIDI_SERVICE);
         }
     }
 
@@ -51,17 +63,19 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
         EventDispatcher.dispatchEvent(this, "Status", text);
     }
 
-    @SimpleEvent(description = "A MIDI device was opened.")
+    @SimpleEvent(description = "MIDI device connected.")
     public void Connected(String name) {
         EventDispatcher.dispatchEvent(this, "Connected", name);
     }
 
-    @SimpleEvent(description = "The current MIDI device was closed.")
+    @SimpleEvent(description = "MIDI device disconnected.")
     public void Disconnected() {
         EventDispatcher.dispatchEvent(this, "Disconnected");
     }
 
-    @SimpleEvent(description = "Raw MIDI bytes as comma-separated unsigned decimal values.")
+    @SimpleEvent(
+        description = "Parsed MIDI message: status,note,velocity or controller,value."
+    )
     public void MidiMessage(String data) {
         EventDispatcher.dispatchEvent(this, "MidiMessage", data);
     }
@@ -71,17 +85,22 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
         return Build.VERSION.SDK_INT;
     }
 
-    @SimpleFunction(description = "Returns the number of MIDI devices visible to Android.")
+    @SimpleFunction(description = "Returns number of MIDI devices.")
     public int DeviceCount() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || midiManager == null) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || midiManager == null) {
             return 0;
         }
+
         return midiManager.getDevices().length;
     }
 
-    @SimpleFunction(description = "Returns devices as index:name:inputPorts:outputPorts separated by semicolons.")
+    @SimpleFunction(
+        description = "Lists devices as index:name:inputPorts:outputPorts."
+    )
     public String ListDevices() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || midiManager == null) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || midiManager == null) {
             return "";
         }
 
@@ -89,10 +108,13 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
         StringBuilder result = new StringBuilder();
 
         for (int i = 0; i < infos.length; i++) {
-            if (i > 0) result.append(";");
+            if (i > 0) {
+                result.append(";");
+            }
 
             MidiDeviceInfo info = infos[i];
-            String name = info.getProperties().getString(MidiDeviceInfo.PROPERTY_NAME);
+            String name = info.getProperties().getString(
+                    MidiDeviceInfo.PROPERTY_NAME);
 
             if (name == null || name.length() == 0) {
                 name = "MIDI Device";
@@ -112,99 +134,105 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
         return result.toString();
     }
 
-    @SimpleFunction(description = "Opens a MIDI device index and OUTPUT port. A USB MIDI keyboard normally sends data through an OUTPUT port.")
+    @SimpleFunction(
+        description = "Opens a MIDI device index and OUTPUT port."
+    )
     public void OpenDevice(final int index, final int port) {
         CloseDevice();
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || midiManager == null) {
-            Status("Android MIDI unavailable. Requires Android 6.0/API 23+.");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || midiManager == null) {
+            postStatus("Android MIDI requires Android 6.0/API 23+.");
             return;
         }
 
         final MidiDeviceInfo[] infos = midiManager.getDevices();
 
         if (index < 0 || index >= infos.length) {
-            Status("Invalid device index: " + index);
+            postStatus("Invalid device index: " + index);
             return;
         }
 
         final MidiDeviceInfo info = infos[index];
 
         if (port < 0 || port >= info.getOutputPortCount()) {
-            Status("Invalid OUTPUT port: " + port);
+            postStatus("Invalid OUTPUT port: " + port);
             return;
         }
 
-        midiManager.openDevice(info, new MidiManager.OnDeviceOpenedListener() {
-            @Override
-            public void onDeviceOpened(MidiDevice openedDevice) {
-                if (openedDevice == null) {
-                    Status("Android failed to open MIDI device.");
-                    return;
-                }
-
-                device = openedDevice;
-
-                try {
-                    outputPort = device.openOutputPort(port);
-
-                    if (outputPort == null) {
-                        Status("Could not open OUTPUT port " + port);
-                        CloseDevice();
+        midiManager.openDevice(
+            info,
+            new MidiManager.OnDeviceOpenedListener() {
+                @Override
+                public void onDeviceOpened(MidiDevice openedDevice) {
+                    if (openedDevice == null) {
+                        postStatus("Failed to open MIDI device.");
                         return;
                     }
 
-                    outputPort.connect(new MidiReceiver() {
-                        @Override
-                        public void onSend(byte[] data, int offset, int count, long timestamp) {
-                            StringBuilder bytes = new StringBuilder();
+                    device = openedDevice;
 
-                            for (int i = offset; i < offset + count; i++) {
-                                if (bytes.length() > 0) {
-                                    bytes.append(",");
+                    try {
+                        outputPort = device.openOutputPort(port);
+
+                        if (outputPort == null) {
+                            postStatus("Could not open OUTPUT port.");
+                            CloseDevice();
+                            return;
+                        }
+
+                        // Reset parser whenever a device is opened.
+                        resetParser();
+
+                        outputPort.connect(new MidiReceiver() {
+                            @Override
+                            public void onSend(
+                                    byte[] data,
+                                    int offset,
+                                    int count,
+                                    long timestamp) {
+
+                                synchronized (UsbMidiBridge.this) {
+                                    parseMidiBytes(data, offset, count);
                                 }
-                                bytes.append(data[i] & 0xFF);
                             }
+                        });
 
-                            final String message = bytes.toString();
+                        String name = info.getProperties().getString(
+                                MidiDeviceInfo.PROPERTY_NAME);
 
-                            mainHandler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    MidiMessage(message);
-                                }
-                            });
+                        if (name == null || name.length() == 0) {
+                            name = "MIDI Device";
                         }
-                    });
 
-                    String name = info.getProperties().getString(MidiDeviceInfo.PROPERTY_NAME);
+                        final String connectedName = name;
 
-                    if (name == null || name.length() == 0) {
-                        name = "MIDI Device";
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                Connected(connectedName);
+                                Status("Connected: " + connectedName
+                                        + " / OUT " + port);
+                            }
+                        });
+
+                    } catch (Exception e) {
+                        postStatus("MIDI error: " + e.getMessage());
+                        CloseDevice();
                     }
-
-                    final String connectedName = name;
-
-                    mainHandler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            Connected(connectedName);
-                            Status("Connected: " + connectedName + " / OUT " + port);
-                        }
-                    });
-
-                } catch (Exception e) {
-                    Status("MIDI error: " + e.getMessage());
-                    CloseDevice();
                 }
-            }
-        }, mainHandler);
+            },
+            mainHandler
+        );
     }
 
-    @SimpleFunction(description = "Opens the first Android MIDI device with an OUTPUT port.")
+    @SimpleFunction(
+        description = "Opens the first MIDI device with an OUTPUT port."
+    )
     public void OpenFirstOutputDevice() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || midiManager == null) {
-            Status("Android MIDI unavailable.");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                || midiManager == null) {
+            postStatus("Android MIDI unavailable.");
             return;
         }
 
@@ -217,7 +245,97 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
             }
         }
 
-        Status("No MIDI device with an OUTPUT port found.");
+        postStatus("No MIDI device with an OUTPUT port found.");
+    }
+
+    /*
+     * Parse incoming MIDI bytes. Realtime bytes (F8-FF) are ignored.
+     * Supports running status and channel messages.
+     */
+    private void parseMidiBytes(byte[] data, int offset, int count) {
+        for (int i = offset; i < offset + count; i++) {
+            int value = data[i] & 0xFF;
+
+            // MIDI realtime messages may appear between any MIDI bytes.
+            if (value >= 0xF8) {
+                continue;
+            }
+
+            if ((value & 0x80) != 0) {
+                // Status byte
+                dataCount = 0;
+
+                if (value >= 0xF0) {
+                    // System common messages are not used for piano notes.
+                    runningStatus = -1;
+                    expectedDataBytes = 0;
+                    continue;
+                }
+
+                runningStatus = value;
+                int command = value & 0xF0;
+
+                // Program Change and Channel Pressure use one data byte.
+                if (command == 0xC0 || command == 0xD0) {
+                    expectedDataBytes = 1;
+                } else {
+                    expectedDataBytes = 2;
+                }
+
+                continue;
+            }
+
+            // Ignore data until a valid channel status is received.
+            if (runningStatus < 0 || expectedDataBytes == 0) {
+                continue;
+            }
+
+            if (dataCount < messageData.length) {
+                messageData[dataCount++] = value;
+            }
+
+            if (dataCount >= expectedDataBytes) {
+                int status = runningStatus;
+                int command = status & 0xF0;
+                int first = messageData[0];
+                int second = expectedDataBytes > 1
+                        ? messageData[1] : 0;
+
+                // Note Off, Note On, and Control Change only.
+                if (command == 0x80
+                        || command == 0x90
+                        || command == 0xB0) {
+
+                    final String message =
+                            status + "," + first + "," + second;
+
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            MidiMessage(message);
+                        }
+                    });
+                }
+
+                // Keep runningStatus to support MIDI running status.
+                dataCount = 0;
+            }
+        }
+    }
+
+    private synchronized void resetParser() {
+        runningStatus = -1;
+        expectedDataBytes = 0;
+        dataCount = 0;
+    }
+
+    private void postStatus(final String message) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                Status(message);
+            }
+        });
     }
 
     @SimpleFunction(description = "Closes the current MIDI device.")
@@ -239,6 +357,8 @@ public class UsbMidiBridge extends AndroidNonvisibleComponent implements Compone
         }
 
         device = null;
+        resetParser();
         Disconnected();
     }
 }
+```
